@@ -153,7 +153,7 @@ impl Staker {
             proposer_index: self.validator_id,
             parent: self.head,
             votes: VariableList::empty(),
-            state_root: None,
+            state_root: Hash::ZERO,
         };
         let mut state: LeanState;
 
@@ -180,7 +180,7 @@ impl Staker {
             }
         }
 
-        new_block.state_root = Some(state.compute_hash());
+        new_block.state_root = state.compute_hash();
         let new_hash = new_block.compute_hash();
 
         self.chain.insert(new_hash, new_block.clone());

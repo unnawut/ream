@@ -25,7 +25,7 @@ pub struct Block {
     pub proposer_index: usize,
     pub parent: Hash,
     pub votes: VariableList<Vote, U16777216>,
-    pub state_root: Option<Hash>,
+    pub state_root: Hash,
 }
 
 impl Block {

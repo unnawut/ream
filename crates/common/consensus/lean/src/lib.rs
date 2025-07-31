@@ -18,7 +18,6 @@ use crate::{block::Block, state::LeanState, vote::Vote};
 
 pub type Hash = B256;
 
-pub const ZERO_HASH: Hash = Hash::ZERO;
 pub const SLOT_DURATION: usize = 12;
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
@@ -138,7 +137,7 @@ pub fn get_fork_choice_head(
     let mut root = *provided_root;
 
     // Start at genesis by default
-    if *root == ZERO_HASH {
+    if *root == Hash::ZERO {
         root = blocks
             .iter()
             .min_by_key(|(_, block)| block.slot)
