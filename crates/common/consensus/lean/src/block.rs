@@ -8,18 +8,17 @@ use ssz_types::{
         U16777216, // 2**24
     },
 };
+use tree_hash_derive::TreeHash;
 
 use crate::{Hash, vote::Vote};
 
-// TODO: Add back #[derive(TreeHash)]
-#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize, Encode, Decode)]
+#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize, Encode, Decode, TreeHash)]
 pub struct SignedBlock {
     pub message: Block,
     pub signature: PQSignature,
 }
 
-// TODO: Add back #[derive(TreeHash)]
-#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize, Encode, Decode, Default)]
+#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize, Encode, Decode, Default, TreeHash)]
 pub struct Block {
     pub slot: usize,
     pub proposer_index: usize,
