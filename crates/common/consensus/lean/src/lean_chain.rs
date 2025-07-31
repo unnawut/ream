@@ -1,29 +1,25 @@
-use std::collections::HashMap;
-
-use ream_pqc::{PQSignature, PublicKey};
-use serde::{Deserialize, Serialize};
+use ream_pqc::PQSignature;
 use ssz_types::{
     VariableList,
     typenum::{
         U16777216, // 2**24
     },
 };
+use std::collections::HashMap;
 
 use crate::{
     Hash, QueueItem, SLOT_DURATION,
     block::Block,
     get_fork_choice_head, get_latest_justified_hash, is_justifiable_slot, process_block,
     state::LeanState,
+    validator::Validator,
     vote::{Vote, VoteData},
 };
 
-// TODO: Add back #[derive(TreeHash)]
-#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
-pub struct Staker {
-    pub validator_id: usize,
-    pub public_key: PublicKey, // Additional to 3SF-mini
+#[derive(Debug, Eq, PartialEq, Clone)]
+pub struct LeanChain {
     pub chain: HashMap<Hash, Block>,
-    pub time: usize, // TODO: update the time so on_tick() works properly
+    pub time: usize,
     // TODO: Add back proper networking instead
     // pub network: Weak<RefCell<P2PNetwork>>,
     pub post_states: HashMap<Hash, LeanState>,
@@ -32,13 +28,14 @@ pub struct Staker {
     pub dependencies: HashMap<Hash, Vec<QueueItem>>,
     pub genesis_hash: Hash,
     // TODO: Proper validator key handling from static config
-    pub num_validators: usize,
+    pub num_total_validators: usize,
+    pub own_validators: Vec<Validator>,
     pub safe_target: Hash,
     pub head: Hash,
 }
 
-impl Staker {
-    pub fn new(validator_id: usize, genesis_block: &Block, genesis_state: &LeanState) -> Staker {
+impl LeanChain {
+    pub fn new(genesis_block: Block, genesis_state: LeanState, own_validators: Vec<Validator>) -> LeanChain {
         let genesis_hash = genesis_block.compute_hash();
         let mut chain = HashMap::<Hash, Block>::new();
         chain.insert(genesis_hash, genesis_block.clone());
@@ -46,9 +43,7 @@ impl Staker {
         let mut post_states = HashMap::<Hash, LeanState>::new();
         post_states.insert(genesis_hash, genesis_state.clone());
 
-        Staker {
-            validator_id,
-            public_key: PublicKey {},
+        LeanChain {
             chain,
             time: 0,
             post_states,
@@ -56,7 +51,8 @@ impl Staker {
             new_votes: VariableList::<Vote, U16777216>::empty(),
             dependencies: HashMap::<Hash, Vec<QueueItem>>::new(),
             genesis_hash,
-            num_validators: genesis_state.stakers.len(),
+            num_total_validators: genesis_state.validators.len(),
+            own_validators,
             safe_target: genesis_hash,
             head: genesis_hash,
         }
@@ -80,7 +76,7 @@ impl Staker {
             &self.chain,
             &justified_hash,
             &self.new_votes,
-            self.num_validators * 2 / 3,
+            self.num_total_validators * 2 / 3,
         )
     }
 
@@ -112,15 +108,20 @@ impl Staker {
 
         // t=0: propose a block
         if time_in_slot == 0 {
-            if self.get_current_slot() % self.num_validators == self.validator_id {
-                // View merge mechanism: a node accepts attestations that it received
-                // <= 1/4 before slot start, or attestations in the latest block
-                self.accept_new_votes();
-                self.propose_block();
+            // TODO: Run each validator on separate threads
+            for validator in self.own_validators.clone() {
+                if self.get_current_slot() % self.num_total_validators == validator.index {
+                    // View merge mechanism: a node accepts attestations that it received
+                    // <= 1/4 before slot start, or attestations in the latest block
+                    self.accept_new_votes();
+                    self.propose_block(&validator);
+                }
             }
         // t=1/4: vote
         } else if time_in_slot == SLOT_DURATION / 4 {
-            self.vote();
+            for validator in self.own_validators.clone() {
+                self.vote(&validator);
+            }
         // t=2/4: compute the safe target (this must be done here to ensure
         // that, assuming network latency assumptions are satisfied, anything that
         // one honest node receives by this time, every honest node will receive by
@@ -138,19 +139,19 @@ impl Staker {
     }
 
     // Called when it's the staker's turn to propose a block
-    fn propose_block(&mut self) {
+    fn propose_block(&mut self, validator: &Validator) {
         let new_slot = self.get_current_slot();
 
         println!(
             "proposing (Staker {}), head = {}",
-            self.validator_id,
+            &validator.index,
             self.chain.get(&self.head).unwrap().slot
         );
 
         let head_state = self.post_states.get(&self.head).unwrap();
         let mut new_block = Block {
             slot: new_slot,
-            proposer_index: self.validator_id,
+            proposer_index: validator.index,
             parent: self.head,
             votes: VariableList::empty(),
             state_root: Hash::ZERO,
@@ -189,11 +190,11 @@ impl Staker {
         // TODO: submit to actual network
         // self.get_network()
         //     .borrow_mut()
-        //     .submit(QueueItem::BlockItem(new_block), self.validator_id);
+        //     .submit(QueueItem::BlockItem(new_block), &validator.index);
     }
 
     // Called when it's the staker's turn to vote
-    fn vote(&mut self) {
+    fn vote(&mut self, validator: &Validator) {
         let state = self.post_states.get(&self.head).unwrap();
         let mut target_block = self.chain.get(&self.head).unwrap();
 
@@ -212,7 +213,7 @@ impl Staker {
         }
 
         let vote_data = VoteData {
-            validator_id: self.validator_id,
+            validator_id: validator.index,
             slot: self.get_current_slot(),
             head: self.head,
             head_slot: self.chain.get(&self.head).unwrap().slot,
@@ -229,7 +230,7 @@ impl Staker {
 
         println!(
             "voting (Staker {}), head = {}, t = {}, s = {}",
-            self.validator_id,
+            &validator.index,
             &self.chain.get(&self.head).unwrap().slot,
             &target_block.slot,
             &state.latest_justified_slot
@@ -240,7 +241,7 @@ impl Staker {
         // TODO: submit to actual network
         // self.get_network()
         //     .borrow_mut()
-        //     .submit(QueueItem::VoteItem(vote), self.validator_id);
+        //     .submit(QueueItem::VoteItem(vote), &validator.index);
     }
 
     // Called by the p2p network

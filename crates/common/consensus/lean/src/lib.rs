@@ -1,6 +1,7 @@
 pub mod block;
-pub mod staker;
+pub mod lean_chain;
 pub mod state;
+pub mod validator;
 pub mod vote;
 
 use std::collections::HashMap;

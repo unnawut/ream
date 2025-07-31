@@ -9,13 +9,13 @@ use ssz_types::{
     },
 };
 
-use crate::{Hash, staker::Staker};
+use crate::{Hash, validator::Validator};
 
 // TODO: Add back #[derive(Encode, Decode, TreeHash)]
 #[derive(Debug, Eq, PartialEq, Clone, Serialize, Deserialize)]
 pub struct LeanState {
     pub genesis_time: usize,
-    pub stakers: VariableList<Staker, U4096>,
+    pub validators: VariableList<Validator, U4096>,
     pub num_validators: usize,
 
     pub latest_justified_hash: Hash,
