@@ -23,8 +23,8 @@ pub struct LeanChain {
     // TODO: Add back proper networking instead
     // pub network: Weak<RefCell<P2PNetwork>>,
     pub post_states: HashMap<Hash, LeanState>,
-    pub known_votes: VariableList<Vote, U16777216>,
-    pub new_votes: VariableList<Vote, U16777216>,
+    pub known_votes: Vec<Vote>,
+    pub new_votes: Vec<Vote>,
     pub dependencies: HashMap<Hash, Vec<QueueItem>>,
     pub genesis_hash: Hash,
     // TODO: Proper validator key handling from static config
@@ -47,8 +47,8 @@ impl LeanChain {
             chain,
             time: 0,
             post_states,
-            known_votes: VariableList::<Vote, U16777216>::empty(),
-            new_votes: VariableList::<Vote, U16777216>::empty(),
+            known_votes: Vec::<Vote>::new(),
+            new_votes: Vec::<Vote>::new(),
             dependencies: HashMap::<Hash, Vec<QueueItem>>::new(),
             genesis_hash,
             num_total_validators: genesis_state.validators.len(),
@@ -92,7 +92,7 @@ impl LeanChain {
             }
         }
 
-        self.new_votes = VariableList::empty();
+        self.new_votes = Vec::<Vote>::new();
         self.recompute_head();
     }
 
@@ -153,7 +153,7 @@ impl LeanChain {
             slot: new_slot,
             proposer_index: validator.index,
             parent: self.head,
-            votes: VariableList::empty(),
+            votes: VariableList::<Vote, U16777216>::empty(),
             state_root: Hash::ZERO,
         };
         let mut state: LeanState;
