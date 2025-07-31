@@ -55,7 +55,7 @@ pub fn process_block(pre_state: &LeanState, block: &Block) -> LeanState {
     while state.historical_block_hashes.len() < block.slot {
         // TODO: proper error handlings
         let _ = state.justified_slots.push(false);
-        let _ = state.historical_block_hashes.push(None);
+        let _ = state.historical_block_hashes.push(Hash::ZERO);
     }
 
     // Process votes
@@ -64,8 +64,8 @@ pub fn process_block(pre_state: &LeanState, block: &Block) -> LeanState {
         // or whose target is not in the history, or whose target is not a
         // valid justifiable slot
         if !state.justified_slots[vote.data.source_slot]
-            || Some(vote.data.source) != state.historical_block_hashes[vote.data.source_slot]
-            || Some(vote.data.target) != state.historical_block_hashes[vote.data.target_slot]
+            || vote.data.source != state.historical_block_hashes[vote.data.source_slot]
+            || vote.data.target != state.historical_block_hashes[vote.data.target_slot]
             || vote.data.target_slot <= vote.data.source_slot
             || !is_justifiable_slot(&state.latest_finalized_slot, &vote.data.target_slot)
         {
@@ -168,7 +168,7 @@ pub fn get_fork_choice_head(
             while blocks.get(&block_hash).unwrap().slot > blocks.get(&root).unwrap().slot {
                 let current_weights = vote_weights.get(&block_hash).unwrap_or(&0);
                 vote_weights.insert(block_hash, current_weights + 1);
-                block_hash = blocks.get(&block_hash).unwrap().parent.unwrap();
+                block_hash = blocks.get(&block_hash).unwrap().parent;
             }
         }
     }
@@ -177,13 +177,13 @@ pub fn get_fork_choice_head(
     let mut children_map = HashMap::<Hash, Vec<Hash>>::new();
 
     for (hash, block) in blocks {
-        if block.parent.is_some() && *vote_weights.get(hash).unwrap_or(&0) >= min_score {
-            match children_map.get_mut(&block.parent.unwrap()) {
+        if *vote_weights.get(hash).unwrap_or(&0) >= min_score {
+            match children_map.get_mut(&block.parent) {
                 Some(child_hashes) => {
                     child_hashes.push(*hash);
                 }
                 None => {
-                    children_map.insert(block.parent.unwrap(), vec![*hash]);
+                    children_map.insert(block.parent, vec![*hash]);
                 }
             }
         }

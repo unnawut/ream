@@ -151,7 +151,7 @@ impl Staker {
         let mut new_block = Block {
             slot: new_slot,
             proposer_index: self.validator_id,
-            parent: Some(self.head),
+            parent: self.head,
             votes: VariableList::empty(),
             state_root: None,
         };
@@ -201,14 +201,14 @@ impl Staker {
         // of the head
         for _ in 0..3 {
             if target_block.slot > self.chain.get(&self.safe_target).unwrap().slot {
-                target_block = self.chain.get(&target_block.parent.unwrap()).unwrap();
+                target_block = self.chain.get(&target_block.parent).unwrap();
             }
         }
 
         // If the latest finalized slot is very far back, then only some slots are
         // valid to justify, make sure the target is one of those
         while !is_justifiable_slot(&state.latest_finalized_slot, &target_block.slot) {
-            target_block = self.chain.get(&target_block.parent.unwrap()).unwrap();
+            target_block = self.chain.get(&target_block.parent).unwrap();
         }
 
         let vote_data = VoteData {
@@ -254,7 +254,7 @@ impl Staker {
                     return;
                 }
 
-                match self.post_states.get(&block.parent.unwrap()) {
+                match self.post_states.get(&block.parent) {
                     Some(parent_state) => {
                         let state = process_block(parent_state, block);
 
@@ -286,7 +286,7 @@ impl Staker {
                         // If we have not yet seen the block's parent, ignore for now,
                         // process later once we actually see the parent
                         self.dependencies
-                            .entry(block.parent.unwrap())
+                            .entry(block.parent)
                             .or_default()
                             .push(queue_item.clone());
                     }

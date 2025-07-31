@@ -23,7 +23,7 @@ pub struct SignedBlock {
 pub struct Block {
     pub slot: usize,
     pub proposer_index: usize,
-    pub parent: Option<Hash>,
+    pub parent: Hash,
     pub votes: VariableList<Vote, U16777216>,
     pub state_root: Option<Hash>,
 }
