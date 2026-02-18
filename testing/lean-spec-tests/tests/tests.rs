@@ -161,6 +161,7 @@ fn test_all_state_transition_fixtures() {
 }
 
 #[test]
+#[ignore = "SSZ tests disabled until leanSpec uses fixed-length signatures"]
 fn test_all_ssz_fixtures() {
     // Initialize tracing subscriber for test output
     let env_filter = match env::var(EnvFilter::DEFAULT_ENV) {
