@@ -1,5 +1,7 @@
 pub mod fork_choice;
 pub mod justifiability;
+#[cfg(feature = "devnet5")]
+pub mod reaggregation;
 pub mod slot_clock;
 pub mod ssz;
 pub mod state_transition;

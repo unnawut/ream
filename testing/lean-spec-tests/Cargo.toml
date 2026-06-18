@@ -23,6 +23,7 @@ devnet5 = [
     "ream-consensus-lean/devnet5",
     "ream-consensus-misc/devnet5",
     "ream-fork-choice-lean/devnet5",
+    "ream-post-quantum-crypto/devnet5",
     "ream-storage/devnet5",
 ]
 

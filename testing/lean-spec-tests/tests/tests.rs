@@ -2,6 +2,8 @@ use std::{env, fs, path::PathBuf};
 
 #[cfg(feature = "devnet4")]
 use lean_spec_tests::fork_choice::{load_fork_choice_test, run_fork_choice_test};
+#[cfg(feature = "devnet5")]
+use lean_spec_tests::reaggregation::{load_reaggregation_test, run_reaggregation_test};
 use lean_spec_tests::{
     justifiability::{load_justifiability_test, run_justifiability_test},
     slot_clock::{load_slot_clock_test, run_slot_clock_test},
@@ -450,4 +452,56 @@ fn test_all_sync_fixtures() {
     info!("Failed: {failed}");
 
     assert_eq!(failed, 0, "Some sync tests failed");
+}
+
+#[cfg(feature = "devnet5")]
+#[test]
+fn test_all_reaggregation_fixtures() {
+    init_tracing();
+
+    let fixtures = find_fixture_files("reaggregation");
+
+    if !should_run_fixture_suite("reaggregation", &fixtures) {
+        return;
+    }
+
+    info!("Found {} reaggregation test fixtures", fixtures.len());
+
+    let mut total_tests = 0;
+    let mut passed = 0;
+    let mut failed = 0;
+
+    for fixture_path in fixtures {
+        debug!("\n=== Loading fixture: {:?} ===", fixture_path.file_name());
+
+        match load_reaggregation_test(&fixture_path) {
+            Ok(fixture) => {
+                for (test_name, test) in &fixture {
+                    total_tests += 1;
+                    info!("Starting test: {test_name}");
+                    match run_reaggregation_test(test_name, test) {
+                        Ok(_) => {
+                            passed += 1;
+                            info!("PASSED: {test_name}");
+                        }
+                        Err(err) => {
+                            failed += 1;
+                            error!("FAILED: {test_name} - {err:?}");
+                        }
+                    }
+                }
+            }
+            Err(err) => {
+                error!("Failed to load fixture {fixture_path:?}: {err:?}");
+                failed += 1;
+            }
+        }
+    }
+
+    info!("\n=== Reaggregation Test Summary ===");
+    info!("Total tests: {total_tests}");
+    info!("Passed: {passed}");
+    info!("Failed: {failed}");
+
+    assert_eq!(failed, 0, "Some reaggregation tests failed");
 }
