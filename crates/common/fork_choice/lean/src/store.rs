@@ -45,7 +45,7 @@ use ream_network_spec::networks::lean_network_spec;
 use ream_network_state_lean::NetworkState;
 #[cfg(feature = "devnet5")]
 use ream_post_quantum_crypto::lean_multisig::type_2::{
-    type_1_aggregate, type_1_from_wire, type_1_to_wire, type_1_verify,
+    type_1_aggregate, type_1_aggregate_tree, type_1_from_wire, type_1_to_wire, type_1_verify,
 };
 #[cfg(feature = "devnet5")]
 use ream_post_quantum_crypto::leansig::public_key::PublicKey;
@@ -164,6 +164,40 @@ pub fn prove_aggregation_jobs(
             job.raw_count,
             &[],
         );
+        results.push(SignedAggregatedAttestation {
+            data: job.data.clone(),
+            proof,
+        });
+    }
+    Ok(results)
+}
+
+/// Prove reaggregation jobs (M2 proactive tiered reaggregation): each job's
+/// children are same-data aggregates already held by this node; they are unioned
+/// via a distributable BINARY TREE ([type_1_aggregate_tree]) rather than a single
+/// wide merge. The fattened result is re-gossiped so the network converges toward
+/// few fat aggregates before the proposer builds — moving the union off the
+/// proposer's critical path. Reuses [AggregationJob] (with empty `raw_xmss`).
+#[cfg(feature = "devnet5")]
+pub fn prove_reaggregation_jobs(
+    jobs: Vec<AggregationJob>,
+) -> anyhow::Result<Vec<SignedAggregatedAttestation>> {
+    let mut results = Vec::with_capacity(jobs.len());
+    for job in jobs {
+        let building_timer = start_timer(&PQ_SIG_AGGREGATED_SIGNATURES_BUILDING_TIME, &[]);
+        let children = job
+            .child_wires
+            .iter()
+            .map(|(wire, public_keys)| type_1_from_wire(wire, public_keys))
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        let merged = type_1_aggregate_tree(&children, &job.data_root.0, job.data.slot as u32)?;
+        let proof = PayloadProof {
+            participants: job.bits.clone(),
+            proof: VariableList::new(type_1_to_wire(&merged))
+                .map_err(|err| anyhow!("Failed to create reaggregated proof_data: {err:?}"))?,
+        };
+        stop_timer(building_timer);
+        inc_int_counter_vec(&PQ_SIG_AGGREGATED_SIGNATURES_TOTAL, &[]);
         results.push(SignedAggregatedAttestation {
             data: job.data.clone(),
             proof,
@@ -2304,6 +2338,123 @@ impl Store {
         Ok(jobs)
     }
 
+    /// M2 proactive tiered reaggregation (run at interval 3). Mirrors
+    /// [Self::aggregate_prepare] but builds jobs purely from HELD aggregate proofs
+    /// (empty `raw_xmss`): for each recent [AttestationData] whose voters need >=2
+    /// fragments to cover, it emits a job whose children are those fragments — to
+    /// be unioned via [prove_reaggregation_jobs] (a distributable binary tree) and
+    /// re-gossiped so the network converges to few fat aggregates before the
+    /// proposer builds. Data already covered by a single fat proof is skipped.
+    #[cfg(feature = "devnet5")]
+    pub async fn reaggregate_prepare(&self) -> anyhow::Result<Vec<AggregationJob>> {
+        let (
+            state_provider,
+            head_root,
+            latest_new_aggregated_payloads_provider,
+            latest_known_aggregated_payloads_provider,
+            attestation_data_by_root_provider,
+        ) = {
+            let db = self.store.lock().await;
+            (
+                db.state_provider(),
+                db.head_provider().get()?,
+                db.latest_new_aggregated_payloads_provider(),
+                db.latest_known_aggregated_payloads_provider(),
+                db.attestation_data_by_root_provider(),
+            )
+        };
+
+        let head_state = state_provider
+            .get(head_root)?
+            .ok_or_else(|| anyhow!("Head state not found"))?;
+
+        let mut new_payloads: HashMap<AttestationData, HashSet<PayloadProof>> = HashMap::new();
+        for (signature_key, proofs) in latest_new_aggregated_payloads_provider.iter()? {
+            if let Some(attestation_data) =
+                attestation_data_by_root_provider.get(signature_key.data_root)?
+            {
+                new_payloads.entry(attestation_data).or_default().extend(proofs);
+            }
+        }
+        let mut known_payloads: HashMap<AttestationData, HashSet<PayloadProof>> = HashMap::new();
+        for (signature_key, proofs) in latest_known_aggregated_payloads_provider.iter()? {
+            if let Some(attestation_data) =
+                attestation_data_by_root_provider.get(signature_key.data_root)?
+            {
+                known_payloads.entry(attestation_data).or_default().extend(proofs);
+            }
+        }
+
+        let mut keys: HashSet<AttestationData> = known_payloads.keys().cloned().collect();
+        keys.extend(new_payloads.keys().cloned());
+
+        const AGG_RECENT_SLOTS: u64 = 16;
+        let head_slot = head_state.slot;
+        keys.retain(|data| data.slot + AGG_RECENT_SLOTS >= head_slot);
+
+        let mut jobs = Vec::new();
+        for data in keys {
+            let data_root = data.tree_hash_root();
+            let mut child_proofs = Vec::new();
+            let mut covered_validators = HashSet::new();
+
+            head_state.extend_proofs_greedily(
+                new_payloads.get(&data),
+                &mut child_proofs,
+                &mut covered_validators,
+            );
+            head_state.extend_proofs_greedily(
+                known_payloads.get(&data),
+                &mut child_proofs,
+                &mut covered_validators,
+            );
+
+            // Only reaggregate when the voters need >=2 fragments to cover; a
+            // single fat proof already covers everything -> nothing to fatten.
+            if child_proofs.len() < 2 {
+                continue;
+            }
+
+            let mut bits = BitList::<U4096>::with_capacity(head_state.validators.len())
+                .map_err(|err| anyhow!("BitList error: {err:?}"))?;
+            for id in &covered_validators {
+                bits.set(*id as usize, true)
+                    .map_err(|err| anyhow!("Failed to set bits: {err:?}"))?;
+            }
+
+            let mut child_wires = Vec::with_capacity(child_proofs.len());
+            for child in &child_proofs {
+                let public_keys = child
+                    .to_validator_indices()
+                    .into_iter()
+                    .map(|validator_id| {
+                        head_state
+                            .validators
+                            .get(validator_id as usize)
+                            .map(|validator| validator.attestation_public_key)
+                            .ok_or_else(|| {
+                                anyhow!(
+                                    "Validator index {validator_id} out of range during reaggregation"
+                                )
+                            })
+                    })
+                    .collect::<anyhow::Result<Vec<_>>>()?;
+                child_wires.push((child.proof.to_vec(), public_keys));
+            }
+
+            jobs.push(AggregationJob {
+                data,
+                data_root,
+                child_wires,
+                raw_xmss: Vec::new(),
+                bits,
+                raw_count: 0,
+            });
+        }
+        jobs.sort_by_key(|job| Reverse(job.data.slot));
+        Ok(jobs)
+    }
+
     #[cfg(feature = "devnet5")]
     pub async fn aggregate_apply(
         &self,
@@ -2656,6 +2807,16 @@ fn shift_projected_finalized_slot(
     Ok(())
 }
 
+/// Runtime switch for the same-data union in [compact_aggregated_proofs]: when
+/// `REAM_TREE_AGGREGATION` is set in the environment, fragments are unioned via a
+/// distributable binary tree ([type_1_aggregate_tree]) rather than a single wide
+/// merge. Off by default until the distributed tier-gossip layer lands (a local
+/// tree does more total work than a wide merge; the win is in distributing tiers).
+#[cfg(feature = "devnet5")]
+fn tree_aggregation_enabled() -> bool {
+    std::env::var_os("REAM_TREE_AGGREGATION").is_some()
+}
+
 fn compact_aggregated_proofs(
     attestations: Vec<AggregatedAttestation>,
     proofs: Vec<PayloadProof>,
@@ -2777,7 +2938,15 @@ fn compact_aggregated_proofs(
                 .zip(children_public_keys.iter())
                 .map(|(proof, public_keys)| type_1_from_wire(&proof.proof, public_keys))
                 .collect::<anyhow::Result<Vec<_>>>()?;
-            let merged = type_1_aggregate(&children, &[], &data_root.0, data.slot as u32)?;
+            // Same-data union of this group's fragments. `type_1_aggregate_tree`
+            // structures it as a distributable binary tree (fan-in 2 per node);
+            // the wide `type_1_aggregate` is the single-node fallback. Gated so we
+            // can A/B without a rebuild until the distributed tier layer lands.
+            let merged = if tree_aggregation_enabled() {
+                type_1_aggregate_tree(&children, &data_root.0, data.slot as u32)?
+            } else {
+                type_1_aggregate(&children, &[], &data_root.0, data.slot as u32)?
+            };
             type_1_to_wire(&merged)
         };
 

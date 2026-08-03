@@ -62,6 +62,54 @@ pub fn type_1_aggregate(
         .map_err(|err| anyhow!("single-message aggregate aggregation failed: {err:?}"))
 }
 
+/// Union many child single-message aggregates into one via a BINARY TREE of
+/// pairwise merges, instead of a single wide N-child [type_1_aggregate].
+///
+/// All children must be aggregates over the same `message`/`slot`; the result is
+/// an equivalent single-message aggregate covering the union of their signers.
+/// Because every node has fan-in 2 and each tier's merges are independent, the
+/// tiers can be produced on separate machines (distributed proving): the tree's
+/// critical path is `depth * one_2child_merge` (logarithmic in N), whereas a
+/// single wide merge is linear in N. On one machine this does strictly more work
+/// than the wide merge; the win comes from distributing the tiers (see the
+/// aggregator gossip layer).
+pub fn type_1_aggregate_tree(
+    children: &[SingleMessageAggregate],
+    message: &[u8; 32],
+    slot: u32,
+) -> Result<SingleMessageAggregate> {
+    let mut level: Vec<SingleMessageAggregate> = match children {
+        [] => return Err(anyhow!("type_1_aggregate_tree requires at least one child")),
+        [single] => return Ok(single.clone()),
+        _ => children.to_vec(),
+    };
+
+    while level.len() > 1 {
+        let mut next = Vec::with_capacity(level.len().div_ceil(2));
+        let mut i = 0;
+        while i < level.len() {
+            if i + 1 < level.len() {
+                next.push(type_1_aggregate(
+                    &[level[i].clone(), level[i + 1].clone()],
+                    &[],
+                    message,
+                    slot,
+                )?);
+                i += 2;
+            } else {
+                // Odd node out carries up to the next tier unchanged.
+                next.push(level[i].clone());
+                i += 1;
+            }
+        }
+        level = next;
+    }
+
+    level
+        .pop()
+        .ok_or_else(|| anyhow!("type_1_aggregate_tree produced no root"))
+}
+
 pub fn type_1_verify(proof: &SingleMessageAggregate) -> Result<()> {
     type_2_setup();
     verify_single_message_aggregate(proof)
@@ -143,4 +191,44 @@ pub fn type_2_verify_block(
     verify_multi_message_aggregate(&proof)
         .map(|_| ())
         .map_err(|err| anyhow!("multi-message aggregate verification failed: {err:?}"))
+}
+
+#[cfg(test)]
+mod tree_tests {
+    use super::{type_1_aggregate, type_1_aggregate_tree, type_1_verify};
+    use crate::leansig::private_key::PrivateKey;
+
+    /// A binary-tree union of same-data fragments must produce a proof that
+    /// verifies, exactly like the single wide merge — on ream's real leansig
+    /// keys. (Structure differs, so we assert equivalence via verification, not
+    /// wire equality.)
+    #[test]
+    fn tree_union_verifies_like_wide() {
+        let message = [9u8; 32];
+        let slot = 3u32;
+        let epoch = slot; // aggregation binds sigs at epoch == slot
+
+        // Build N leaves, each an aggregate over one validator's raw signature.
+        let mut leaves = Vec::new();
+        for _ in 0..5 {
+            let (public_key, mut private_key) = PrivateKey::generate_key_pair(0, 16);
+            let mut guard = 0;
+            while !private_key.get_prepared_interval().contains(&(epoch as u64)) && guard < 64 {
+                private_key.prepare_signature();
+                guard += 1;
+            }
+            let signature = private_key.sign(&message, epoch).unwrap();
+            leaves.push(type_1_aggregate(&[], &[(public_key, signature)], &message, slot).unwrap());
+        }
+
+        // 5 children exercises odd-node carry-up (5 -> 3 -> 2 -> 1).
+        let wide = type_1_aggregate(&leaves, &[], &message, slot).unwrap();
+        let tree = type_1_aggregate_tree(&leaves, &message, slot).unwrap();
+        type_1_verify(&wide).expect("wide union verifies");
+        type_1_verify(&tree).expect("tree union verifies");
+
+        // Single-child tree is a no-op passthrough that still verifies.
+        let one = type_1_aggregate_tree(&leaves[..1], &message, slot).unwrap();
+        type_1_verify(&one).expect("single-child tree verifies");
+    }
 }
